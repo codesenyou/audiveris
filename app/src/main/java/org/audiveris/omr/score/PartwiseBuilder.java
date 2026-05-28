@@ -24,6 +24,8 @@ package org.audiveris.omr.score;
 import org.audiveris.omr.WellKnowns;
 import org.audiveris.omr.constant.Constant;
 import org.audiveris.omr.constant.ConstantSet;
+import org.audiveris.omr.glyph.Glyph;
+import org.audiveris.omr.glyph.GlyphGroup;
 import org.audiveris.omr.glyph.Shape;
 import static org.audiveris.omr.glyph.Shape.CODA;
 import static org.audiveris.omr.glyph.Shape.SEGNO;
@@ -241,6 +243,7 @@ import org.slf4j.LoggerFactory;
 import jakarta.xml.bind.JAXBElement;
 import jakarta.xml.bind.JAXBException;
 
+import java.awt.Color;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.Point;
@@ -2002,6 +2005,28 @@ public class PartwiseBuilder
         return isPairFingeringText(value) ? value : "";
     }
 
+    //---------------------------//
+    // bestSingleFingeringText //
+    //---------------------------//
+    private String bestSingleFingeringText (String content)
+    {
+        final StringBuilder digits = new StringBuilder();
+
+        for (int i = 0; i < content.length(); i++) {
+            final char ch = content.charAt(i);
+
+            if ((ch >= '1') && (ch <= '5')) {
+                digits.append(ch);
+            } else if ((ch >= '0') && (ch <= '9')) {
+                return "";
+            }
+        }
+
+        final String value = digits.toString();
+
+        return isSingleOcrFingeringText(value) ? value : "";
+    }
+
     //----------------------//
     // addTechnicalFingering //
     //----------------------//
@@ -3184,7 +3209,7 @@ public class PartwiseBuilder
                 }
 
                 recoverNearbyOcrFingeringPair(head);
-                recoverReviewedInvent1Marks(head);
+                recoverNearbySourceGlyphFingering(head);
 
                 // Plucking?
                 final PluckingInter plucking = head.getPlucking();
@@ -3374,88 +3399,190 @@ public class PartwiseBuilder
         }
     }
 
-    //-----------------------------//
-    // recoverReviewedInvent1Marks //
-    //-----------------------------//
-    private void recoverReviewedInvent1Marks (HeadInter head)
+    //-----------------------------------//
+    // recoverNearbySourceGlyphFingering //
+    //-----------------------------------//
+    /**
+     * Recover a single fingering digit from a nearby segmented source glyph.
+     * <p>
+     * This stays tied to actual SYMBOL glyph evidence already present in the saved OMR graph. It
+     * does not depend on a particular measure, pitch, or score layout coordinate.
+     *
+     * @param head the note head being exported
+     */
+    private void recoverNearbySourceGlyphFingering (HeadInter head)
     {
         if (!current.system.getSheet().getStub().getProcessingSwitches().getValue(
                 ProcessingSwitch.fingerings)) {
             return;
         }
 
-        final int measure = currentMeasureNumber();
-
-        if ((measure == 10) && isNoteOnStaff(head, Step.B, 4, 1) && isNearDefaultX(262, 8)) {
-            addDisplayedAccidental(Shape.NATURAL);
-            addTechnicalFingering("3", head.getCenter2D(), head);
-
+        if ((head.getFingering() != null) || noteHasTechnicalFingering(head)) {
             return;
         }
 
-        if ((measure == 14) && isNoteOnStaff(head, Step.C, 4, 2) && isNearDefaultX(203, 8)) {
-            addTechnicalFingering("4", head.getCenter2D(), head);
+        final Glyph glyph = findNearbyFingeringGlyph(head);
 
+        if (glyph == null) {
             return;
         }
 
-        if ((measure == 21) && isNoteOnStaff(head, Step.E, 4, 1) && isNearDefaultX(358, 8)) {
-            addTechnicalFingering("2", head.getCenter2D(), head);
-        }
-    }
+        final Sheet sheet = current.system.getSheet();
 
-    //----------------------//
-    // currentMeasureNumber //
-    //----------------------//
-    private int currentMeasureNumber ()
-    {
         try {
-            return Integer.parseInt(current.measure.getStack().getScoreId(
-                    current.pageMeasureIdOffset));
-        } catch (NumberFormatException ex) {
-            return -1;
+            final BufferedImage image = cropGlyphForOcr(sheet, glyph);
+            final String value = scanSingleFingeringGlyphWithTesseract(image);
+
+            if (isSingleOcrFingeringText(value)) {
+                addTechnicalFingering(value, glyph.getCenter2D(), head);
+                current.recoveredFingeringGlyphs.add(glyph.getId());
+            }
+        } catch (Exception ex) {
+            logger.debug("Could not OCR source glyph fingering for {}", head, ex);
         }
     }
 
-    //----------------//
-    // isNoteOnStaff //
-    //----------------//
-    private boolean isNoteOnStaff (HeadInter head,
-                                   Step step,
-                                   int octave,
-                                   int staffNumber)
+    //--------------------------//
+    // findNearbyFingeringGlyph //
+    //--------------------------//
+    private Glyph findNearbyFingeringGlyph (HeadInter head)
     {
-        final Pitch pitch = current.pmNote.getPitch();
+        final Sheet sheet = current.system.getSheet();
+        final int interline = sheet.getScale().getInterline();
+        final Rectangle headBox = head.getBounds();
+        Glyph best = null;
+        double bestScore = Double.MAX_VALUE;
 
-        return (pitch != null)
-                && (pitch.getStep() == step)
-                && (pitch.getOctave() == octave)
-                && (current.pmNote.getStaff() != null)
-                && (current.pmNote.getStaff().intValue() == staffNumber);
-    }
+        for (Glyph glyph : current.system.getGroupedGlyphs(GlyphGroup.SYMBOL)) {
+            if (current.recoveredFingeringGlyphs.contains(glyph.getId())) {
+                continue;
+            }
 
-    //----------------//
-    // isNearDefaultX //
-    //----------------//
-    private boolean isNearDefaultX (int expected,
-                                    int tolerance)
-    {
-        return (current.pmNote.getDefaultX() != null)
-                && (Math.abs(current.pmNote.getDefaultX().intValue() - expected) <= tolerance);
-    }
+            if (isGlyphAlreadyInterpreted(glyph)) {
+                continue;
+            }
 
-    //------------------------//
-    // addDisplayedAccidental //
-    //------------------------//
-    private void addDisplayedAccidental (Shape shape)
-    {
-        if (current.pmNote.getAccidental() != null) {
-            return;
+            if (!isSingleFingeringGlyphCandidate(glyph, head, interline)) {
+                continue;
+            }
+
+            final Rectangle glyphBox = glyph.getBounds();
+            final double dx = Math.abs(glyphBox.getCenterX() - headBox.getCenterX());
+            final double gap = verticalGap(glyphBox, headBox);
+            final double score = dx + (gap / 4.0);
+
+            if (score < bestScore) {
+                best = glyph;
+                bestScore = score;
+            }
         }
 
-        final Accidental accidental = factory.createAccidental();
-        accidental.setValue(accidentalValueOf(shape));
-        current.pmNote.setAccidental(accidental);
+        return best;
+    }
+
+    //---------------------------//
+    // isGlyphAlreadyInterpreted //
+    //---------------------------//
+    private boolean isGlyphAlreadyInterpreted (Glyph glyph)
+    {
+        for (Inter inter : current.system.getSig().vertexSet()) {
+            final Glyph interGlyph = inter.getGlyph();
+
+            if ((interGlyph != null) && (interGlyph.getId() == glyph.getId())) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    //---------------------------------//
+    // isSingleFingeringGlyphCandidate //
+    //---------------------------------//
+    private boolean isSingleFingeringGlyphCandidate (Glyph glyph,
+                                                     HeadInter head,
+                                                     int interline)
+    {
+        final Rectangle glyphBox = glyph.getBounds();
+        final Rectangle headBox = head.getBounds();
+        final int minWidth = Math.max(8, interline / 3);
+        final int maxWidth = Math.max(16, (5 * interline) / 4);
+        final int minHeight = Math.max(12, (2 * interline) / 3);
+        final int maxHeight = Math.max(24, (3 * interline) / 2);
+
+        if ((glyphBox.width < minWidth) || (glyphBox.width > maxWidth)
+                || (glyphBox.height < minHeight) || (glyphBox.height > maxHeight)) {
+            return false;
+        }
+
+        final double dx = Math.abs(glyphBox.getCenterX() - headBox.getCenterX());
+
+        if (dx > Math.max(headBox.width, (5 * interline) / 4)) {
+            return false;
+        }
+
+        final double gap = verticalGap(glyphBox, headBox);
+
+        return (gap >= 0) && (gap <= (6.75 * interline));
+    }
+
+    //-------------//
+    // verticalGap //
+    //-------------//
+    private double verticalGap (Rectangle first,
+                                Rectangle second)
+    {
+        if (first.y > (second.y + second.height)) {
+            return first.y - (second.y + second.height);
+        }
+
+        if (second.y > (first.y + first.height)) {
+            return second.y - (first.y + first.height);
+        }
+
+        return -1;
+    }
+
+    //-----------------//
+    // cropGlyphForOcr //
+    //-----------------//
+    private BufferedImage cropGlyphForOcr (Sheet sheet,
+                                           Glyph glyph)
+    {
+        final int margin = Math.max(6, sheet.getScale().getInterline() / 2);
+        final Rectangle sheetBox = new Rectangle(0, 0, sheet.getWidth(), sheet.getHeight());
+        final Rectangle scene = glyph.getBounds();
+
+        scene.grow(margin, margin);
+        scene.setBounds(scene.intersection(sheetBox));
+
+        final ByteProcessor source = sheet.getPicture().getSource(Picture.SourceKey.BINARY);
+        source.setRoi(scene);
+
+        return padForOcr(((ByteProcessor) source.crop()).getBufferedImage(), margin);
+    }
+
+    //-----------//
+    // padForOcr //
+    //-----------//
+    private BufferedImage padForOcr (BufferedImage image,
+                                     int margin)
+    {
+        final BufferedImage padded = new BufferedImage(
+                image.getWidth() + (2 * margin),
+                image.getHeight() + (2 * margin),
+                BufferedImage.TYPE_BYTE_BINARY);
+        final Graphics2D g = padded.createGraphics();
+
+        try {
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, padded.getWidth(), padded.getHeight());
+            g.drawImage(image, margin, margin, null);
+        } finally {
+            g.dispose();
+        }
+
+        return padded;
     }
 
     //---------------------//
@@ -3570,6 +3697,50 @@ public class PartwiseBuilder
         addTechnicalFingering(String.valueOf(value.charAt(0)), firstLocation, first);
         current.pendingFingerings.computeIfAbsent(second, n -> new ArrayList<>()).add(
                 new PendingFingering(String.valueOf(value.charAt(1)), secondLocation));
+    }
+
+    //----------------------------------------//
+    // scanSingleFingeringGlyphWithTesseract //
+    //----------------------------------------//
+    /**
+     * Use the system Tesseract CLI as a digit-only fallback for one segmented source glyph.
+     *
+     * @param image glyph crop
+     * @return one OCR digit, or an empty string
+     * @throws IOException          on temporary file or process failure
+     * @throws InterruptedException if the process wait is interrupted
+     */
+    private String scanSingleFingeringGlyphWithTesseract (BufferedImage image)
+            throws IOException, InterruptedException
+    {
+        final Path temp = Files.createTempFile("audiveris-single-fingering-", ".png");
+
+        try {
+            ImageIO.write(scaleForOcr(image), "png", temp.toFile());
+
+            final Process process = new ProcessBuilder(
+                    "tesseract",
+                    temp.toString(),
+                    "stdout",
+                    "--psm",
+                    "10",
+                    "--oem",
+                    "1",
+                    "-c",
+                    "tessedit_char_whitelist=012345").redirectErrorStream(true).start();
+
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return "";
+            }
+
+            final String text = new String(process.getInputStream().readAllBytes(),
+                    StandardCharsets.UTF_8);
+
+            return (process.exitValue() == 0) ? bestSingleFingeringText(text) : "";
+        } finally {
+            Files.deleteIfExists(temp);
+        }
     }
 
     //----------------------------------//
@@ -4946,6 +5117,8 @@ public class PartwiseBuilder
 
         final Set<AbstractNoteInter> sourceMarkerOrnamentNotes = new HashSet<>();
 
+        final Set<Integer> recoveredFingeringGlyphs = new HashSet<>();
+
         final TreeMap<Integer, Key> keys = new TreeMap<>();
 
         Voice voice;
@@ -4969,6 +5142,7 @@ public class PartwiseBuilder
             pendingFingerings.clear();
             technicalFingeringValues.clear();
             sourceMarkerOrnamentNotes.clear();
+            recoveredFingeringGlyphs.clear();
 
             endVoice();
         }
