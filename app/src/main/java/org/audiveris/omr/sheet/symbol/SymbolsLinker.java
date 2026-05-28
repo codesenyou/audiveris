@@ -21,11 +21,13 @@
 // </editor-fold>
 package org.audiveris.omr.sheet.symbol;
 
+import org.audiveris.omr.glyph.Shape;
 import org.audiveris.omr.sheet.SystemInfo;
 import org.audiveris.omr.sheet.rhythm.MeasureStack;
 import org.audiveris.omr.sheet.rhythm.TupletsBuilder;
 import org.audiveris.omr.sig.SIGraph;
 import org.audiveris.omr.sig.inter.AbstractChordInter;
+import org.audiveris.omr.sig.inter.ArticulationInter;
 import org.audiveris.omr.sig.inter.BeamGroupInter;
 import org.audiveris.omr.sig.inter.DynamicsInter;
 import org.audiveris.omr.sig.inter.FermataInter;
@@ -40,7 +42,9 @@ import org.audiveris.omr.sig.inter.SentenceInter;
 import org.audiveris.omr.sig.inter.SlurInter;
 import org.audiveris.omr.sig.inter.SmallChordInter;
 import org.audiveris.omr.sig.inter.WedgeInter;
+import org.audiveris.omr.sig.relation.ChordArticulationRelation;
 import org.audiveris.omr.sig.relation.ChordGraceRelation;
+import org.audiveris.omr.sig.relation.FermataChordRelation;
 import org.audiveris.omr.sig.relation.Link;
 import org.audiveris.omr.sig.relation.Relation;
 import org.audiveris.omr.sig.relation.SlurHeadRelation;
@@ -49,6 +53,7 @@ import org.audiveris.omr.util.HorizontalSide;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.awt.Rectangle;
 import java.util.Collection;
 import java.util.List;
 
@@ -117,6 +122,43 @@ public class SymbolsLinker
                 dynamics.linkWithChord();
             } catch (Exception ex) {
                 logger.warn("Error in linkDynamics for {} {}", inter, ex.toString(), ex);
+            }
+        }
+    }
+
+    //-------------------------------------//
+    // discardArticulationsInsideFermatas //
+    //-------------------------------------//
+    /**
+     * A fermata dot can also be interpreted as a staccato dot. Once the compound fermata is linked,
+     * discard the enclosed staccato when it targets the same chord.
+     */
+    private void discardArticulationsInsideFermatas ()
+    {
+        for (Inter fInter : sig.inters(FermataInter.class)) {
+            final FermataInter fermata = (FermataInter) fInter;
+            final Rectangle fermataBounds = fermata.getBounds();
+
+            for (Relation fRel : sig.getRelations(fermata, FermataChordRelation.class)) {
+                final Inter chord = sig.getOppositeInter(fermata, fRel);
+
+                for (Inter aInter : sig.inters(ArticulationInter.class)) {
+                    final ArticulationInter articulation = (ArticulationInter) aInter;
+
+                    if ((articulation.getShape() != Shape.STACCATO) || !fermataBounds.contains(
+                            articulation.getBounds())) {
+                        continue;
+                    }
+
+                    for (Relation aRel : sig.getRelations(
+                            articulation,
+                            ChordArticulationRelation.class)) {
+                        if (sig.getOppositeInter(articulation, aRel) == chord) {
+                            articulation.remove();
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -360,6 +402,7 @@ public class SymbolsLinker
         linkPedals();
         linkWedges();
         linkFermatas();
+        discardArticulationsInsideFermatas();
         linkGraces();
         linkAugmentationDots();
         linkTuplets();

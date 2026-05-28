@@ -3028,7 +3028,9 @@ public class PartwiseBuilder
                     scorePartwise.getIdentification().getCreator().add(typedText);
                 }
 
-                case UnknownRole -> {}
+                case UnknownRole -> {
+                    return;
+                }
 
                 default -> {
                     // LyricItem, Direction, Metronome, ChordName are handled through related Note

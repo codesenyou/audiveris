@@ -374,18 +374,40 @@ public class FermataInter
     {
         // Look for proper staff
         final Point2D center = glyph.getCenter2D();
-        final Staff staff = (shape == Shape.FERMATA) ? system.getStaffAtOrBelow(center)
-                : system.getStaffAtOrAbove(center);
+        Shape actualShape = shape;
+        Staff staff = getTargetStaff(system, center, actualShape);
+
+        if (staff == null) {
+            final Shape oppositeShape =
+                    (shape == Shape.FERMATA) ? Shape.FERMATA_BELOW : Shape.FERMATA;
+            final Staff oppositeStaff = getTargetStaff(system, center, oppositeShape);
+
+            if (oppositeStaff != null) {
+                actualShape = oppositeShape;
+                staff = oppositeStaff;
+            }
+        }
 
         if (staff == null) {
             return null;
         }
 
-        final FermataInter fermata = new FermataInter(glyph, shape, grade);
+        final FermataInter fermata = new FermataInter(glyph, actualShape, grade);
         fermata.setStaff(staff);
         staff.getSystem().getSig().addVertex(fermata);
 
         return fermata;
+    }
+
+    //----------------//
+    // getTargetStaff //
+    //----------------//
+    private static Staff getTargetStaff (SystemInfo system,
+                                         Point2D center,
+                                         Shape shape)
+    {
+        return (shape == Shape.FERMATA) ? system.getStaffAtOrBelow(center)
+                : system.getStaffAtOrAbove(center);
     }
 
     //~ Inner Classes ------------------------------------------------------------------------------
