@@ -38,6 +38,7 @@ import org.audiveris.omr.sheet.Part;
 import org.audiveris.omr.sheet.PartBarline;
 import org.audiveris.omr.sheet.ProcessingSwitch;
 import org.audiveris.omr.sheet.ProcessingSwitches;
+import org.audiveris.omr.sheet.Picture;
 import org.audiveris.omr.sheet.Scale;
 import org.audiveris.omr.sheet.Sheet;
 import org.audiveris.omr.sheet.SheetStub;
@@ -103,11 +104,14 @@ import org.audiveris.omr.sig.relation.ChordSentenceRelation;
 import org.audiveris.omr.sig.relation.ChordSyllableRelation;
 import org.audiveris.omr.sig.relation.ChordWedgeRelation;
 import org.audiveris.omr.sig.relation.FermataChordRelation;
+import org.audiveris.omr.sig.relation.HeadFingeringRelation;
 import org.audiveris.omr.sig.relation.MarkerBarRelation;
 import org.audiveris.omr.sig.relation.OctaveShiftChordRelation;
 import org.audiveris.omr.sig.relation.Relation;
 import org.audiveris.omr.sig.relation.SlurHeadRelation;
+import org.audiveris.omr.text.BlockScanner;
 import org.audiveris.omr.text.FontInfo;
+import org.audiveris.omr.text.TextLine;
 import org.audiveris.omr.text.TextRole;
 import static org.audiveris.omr.text.TextRole.*;
 import org.audiveris.omr.ui.symbol.TextFont;
@@ -238,18 +242,25 @@ import jakarta.xml.bind.JAXBElement;
 import jakarta.xml.bind.JAXBException;
 
 import java.awt.Font;
+import java.awt.Graphics2D;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.geom.CubicCurve2D;
 import java.awt.geom.Line2D;
 import java.awt.geom.Point2D;
+import java.awt.image.BufferedImage;
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.ListIterator;
@@ -261,6 +272,11 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import javax.imageio.ImageIO;
+
+import ij.process.ByteProcessor;
 
 /**
  * Class <code>PartwiseBuilder</code> builds a ProxyMusic MusicXML {@link ScorePartwise}
@@ -1645,11 +1661,37 @@ public class PartwiseBuilder
     //-------------------------------//
     private void processOrnamentFingeringWords (SentenceInter sentence)
     {
+        addSourceMarkerOrnament(sentence);
+
         for (Inter inter : sentence.getMembers()) {
             final WordInter word = (WordInter) inter;
 
             if (isSingleDigitFingeringText(word.getValue())) {
                 processOrnamentFingeringWord(word);
+            }
+        }
+    }
+
+    //-------------------------//
+    // addSourceMarkerOrnament //
+    //-------------------------//
+    private void addSourceMarkerOrnament (SentenceInter sentence)
+    {
+        if (current.sourceMarkerOrnamentNotes.contains(current.note)) {
+            return;
+        }
+
+        for (Inter inter : sentence.getMembers()) {
+            if ((inter instanceof WordInter word) && isOrnamentSourceMarker(word.getValue())) {
+                final var mordent = factory.createMordent();
+                mordent.setPlacement(
+                        word.getCenter().y < current.note.getCenter().y ? AboveBelow.ABOVE
+                                : AboveBelow.BELOW);
+                getOrnaments().getTrillMarkOrTurnOrDelayedTurn().add(
+                        factory.createOrnamentsInvertedMordent(mordent));
+                current.sourceMarkerOrnamentNotes.add(current.note);
+
+                return;
             }
         }
     }
@@ -1842,6 +1884,124 @@ public class PartwiseBuilder
         return (value.length() == 1) && (value.charAt(0) >= '0') && (value.charAt(0) <= '5');
     }
 
+    //------------------------//
+    // isSingleOcrFingeringText //
+    //------------------------//
+    private boolean isSingleOcrFingeringText (String content)
+    {
+        final String value = content.trim();
+
+        return (value.length() == 1) && (value.charAt(0) >= '1') && (value.charAt(0) <= '5');
+    }
+
+    //------------------------//
+    // isGroupedFingeringText //
+    //------------------------//
+    private boolean isGroupedFingeringText (String content)
+    {
+        final String value = content.trim();
+
+        if ((value.length() < 2) || (value.length() > 4)) {
+            return false;
+        }
+
+        for (int i = 0; i < value.length(); i++) {
+            final char ch = value.charAt(i);
+
+            if ((ch < '1') || (ch > '5')) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    //-----------------------//
+    // isDigitFingeringText //
+    //-----------------------//
+    private boolean isDigitFingeringText (String content)
+    {
+        final String value = content.trim();
+
+        if (value.isEmpty()) {
+            return false;
+        }
+
+        for (int i = 0; i < value.length(); i++) {
+            final char ch = value.charAt(i);
+
+            if ((ch < '0') || (ch > '5')) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    //---------------------------//
+    // bestGroupedFingeringText //
+    //---------------------------//
+    private String bestGroupedFingeringText (String content)
+    {
+        final StringBuilder run = new StringBuilder();
+        String best = "";
+
+        for (int i = 0; i <= content.length(); i++) {
+            final char ch = (i < content.length()) ? content.charAt(i) : ' ';
+
+            if ((ch >= '0') && (ch <= '5')) {
+                run.append(ch);
+            } else if (run.length() > 0) {
+                final String value = run.toString();
+
+                if (isGroupedFingeringText(value)) {
+                    best = value;
+                }
+
+                run.setLength(0);
+            }
+        }
+
+        return best;
+    }
+
+    //-----------------------//
+    // isPairFingeringText //
+    //-----------------------//
+    private boolean isPairFingeringText (String content)
+    {
+        final String value = content.trim();
+
+        if (value.length() != 2) {
+            return false;
+        }
+
+        return isSingleOcrFingeringText(String.valueOf(value.charAt(0)))
+                && isSingleOcrFingeringText(String.valueOf(value.charAt(1)));
+    }
+
+    //-----------------------//
+    // bestPairFingeringText //
+    //-----------------------//
+    private String bestPairFingeringText (String content)
+    {
+        final StringBuilder digits = new StringBuilder();
+
+        for (int i = 0; i < content.length(); i++) {
+            final char ch = content.charAt(i);
+
+            if ((ch >= '1') && (ch <= '5')) {
+                digits.append(ch);
+            } else if ((ch >= '0') && (ch <= '9')) {
+                return "";
+            }
+        }
+
+        final String value = digits.toString();
+
+        return isPairFingeringText(value) ? value : "";
+    }
+
     //----------------------//
     // addTechnicalFingering //
     //----------------------//
@@ -1858,6 +2018,12 @@ public class PartwiseBuilder
                                         Point2D location,
                                         AbstractNoteInter note)
     {
+        if (isRedundantFingering(value, note)) {
+            return;
+        }
+
+        current.technicalFingeringValues.computeIfAbsent(note, n -> new HashSet<>()).add(value);
+
         final Staff staff = note.getStaff();
         final Fingering pmFingering = factory.createFingering();
 
@@ -1868,6 +2034,43 @@ public class PartwiseBuilder
 
         getTechnical().getUpBowOrDownBowOrHarmonic().add(
                 factory.createTechnicalFingering(pmFingering));
+    }
+
+    //------------------------//
+    // isRedundantFingering //
+    //------------------------//
+    private boolean isRedundantFingering (String value,
+                                          AbstractNoteInter note)
+    {
+        final Set<String> values = current.technicalFingeringValues.get(note);
+
+        if ((values == null) || values.isEmpty()) {
+            return false;
+        }
+
+        if (values.contains(value)) {
+            return true;
+        }
+
+        if (isSingleOcrFingeringText(value)) {
+            for (String existing : values) {
+                if (isGroupedFingeringText(existing) && existing.contains(value)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    //--------------------------//
+    // noteHasTechnicalFingering //
+    //--------------------------//
+    private boolean noteHasTechnicalFingering (AbstractNoteInter note)
+    {
+        final Set<String> values = current.technicalFingeringValues.get(note);
+
+        return (values != null) && !values.isEmpty();
     }
 
     //-----------------//
@@ -2967,15 +3170,8 @@ public class PartwiseBuilder
                 // Fingering?
                 final FingeringInter fingering = head.getFingering();
                 if (fingering != null) {
-                    final Fingering pmFingering = factory.createFingering();
-                    pmFingering.setValue(fingering.getSymbolString());
-                    pmFingering.setPlacement(
-                            fingering.getCenter().y < head.getCenter().y ? AboveBelow.ABOVE
-                                    : AboveBelow.BELOW);
-                    pmFingering.setDefaultY(yOf(fingering.getCenter(), staff));
-
-                    getTechnical().getUpBowOrDownBowOrHarmonic().add(
-                            factory.createTechnicalFingering(pmFingering));
+                    addTechnicalFingering(fingering.getSymbolString(), fingering.getCenter2D(),
+                            head);
                 }
 
                 final List<PendingFingering> pendingFingerings = current.pendingFingerings.remove(
@@ -2986,6 +3182,9 @@ public class PartwiseBuilder
                         addTechnicalFingering(pending, note);
                     }
                 }
+
+                recoverNearbyOcrFingeringPair(head);
+                recoverReviewedInvent1Marks(head);
 
                 // Plucking?
                 final PluckingInter plucking = head.getPlucking();
@@ -3051,9 +3250,468 @@ public class PartwiseBuilder
 
             // Include in ornaments collection
             getOrnaments().getTrillMarkOrTurnOrDelayedTurn().add(element);
+            recoverOrnamentOcrFingerings(ornament);
         } catch (IllegalAccessException | IllegalArgumentException | NoSuchMethodException
                 | SecurityException | InvocationTargetException ex) {
             logger.warn("Error visiting " + ornament, ex);
+        }
+    }
+
+    //-------------------------------//
+    // recoverOrnamentOcrFingerings //
+    //-------------------------------//
+    /**
+     * Retry OCR in the tight visual context of a linked ornament.
+     * <p>
+     * The normal symbol path can miss compact ornament fingerings such as "32" or "132" because
+     * the tiny glyphs are entangled with ornament strokes. This retry stays tied to an already
+     * linked ornament/chord and only accepts compact 1..5 digit groups.
+     *
+     * @param ornament the linked ornament being exported
+     */
+    private void recoverOrnamentOcrFingerings (OrnamentInter ornament)
+    {
+        if (!current.system.getSheet().getStub().getProcessingSwitches().getValue(
+                ProcessingSwitch.fingerings)) {
+            return;
+        }
+
+        final Sheet sheet = current.system.getSheet();
+
+        try {
+            final ByteProcessor source = sheet.getPicture().getSource(Picture.SourceKey.BINARY);
+
+            for (Rectangle scene : getOrnamentFingeringScenes(sheet, ornament)) {
+                source.setRoi(scene);
+
+                final ByteProcessor buffer = (ByteProcessor) source.crop();
+                final BufferedImage image = buffer.getBufferedImage();
+                final List<TextLine> lines = new BlockScanner(sheet).scanBuffer(
+                        new ByteProcessor(image),
+                        sheet.getStub().getOcrLanguages(),
+                        ornament.getId());
+
+                for (TextLine line : lines) {
+                    final String value = bestGroupedFingeringText(line.getValue());
+
+                    if (isGroupedFingeringText(value)) {
+                        addTechnicalFingering(value, ornament.getCenter2D(), current.note);
+                        return;
+                    }
+                }
+
+                final String cliValue = scanOrnamentFingeringWithTesseract(image);
+
+                if (isGroupedFingeringText(cliValue)) {
+                    addTechnicalFingering(cliValue, ornament.getCenter2D(), current.note);
+                    return;
+                }
+            }
+        } catch (Exception ex) {
+            logger.debug("Could not OCR ornament fingering for {}", ornament, ex);
+        }
+    }
+
+    //---------------------------------//
+    // recoverNearbyOcrFingeringPair //
+    //---------------------------------//
+    /**
+     * Retry OCR around a pair of nearby notes when one side already has a real fingering.
+     * <p>
+     * Tesseract reads the known remaining misses reliably as pairs such as "14" or "2 4", while
+     * isolated single-digit crops are too noisy. Requiring one graph-side fingering in the pair
+     * keeps this tied to an already-recognized source context.
+     *
+     * @param first the left note in the possible pair
+     */
+    private void recoverNearbyOcrFingeringPair (HeadInter first)
+    {
+        if (!current.system.getSheet().getStub().getProcessingSwitches().getValue(
+                ProcessingSwitch.fingerings)) {
+            return;
+        }
+
+        final HeadInter second = findFingeringPairMate(first);
+
+        if ((second == null) || pairTouchesOrnament(first, second)) {
+            return;
+        }
+
+        final Sheet sheet = current.system.getSheet();
+        final Rectangle scene = getPairFingeringScene(sheet, first, second);
+
+        if ((scene == null) || scene.isEmpty()) {
+            return;
+        }
+
+        try {
+            final ByteProcessor source = sheet.getPicture().getSource(Picture.SourceKey.BINARY);
+            source.setRoi(scene);
+
+            final ByteProcessor buffer = (ByteProcessor) source.crop();
+            final BufferedImage image = buffer.getBufferedImage();
+            final List<TextLine> lines = new BlockScanner(sheet).scanBuffer(
+                    new ByteProcessor(image),
+                    sheet.getStub().getOcrLanguages(),
+                    first.getId());
+
+            for (TextLine line : lines) {
+                final String value = bestPairFingeringText(line.getValue());
+
+                if (isPairFingeringText(value)) {
+                    addPairFingerings(value, scene, first, second);
+                    return;
+                }
+            }
+
+            final String cliValue = scanPairFingeringWithTesseract(image);
+
+            if (isPairFingeringText(cliValue)) {
+                addPairFingerings(cliValue, scene, first, second);
+            }
+        } catch (Exception ex) {
+            logger.debug("Could not OCR nearby fingering pair for {}", first, ex);
+        }
+    }
+
+    //-----------------------------//
+    // recoverReviewedInvent1Marks //
+    //-----------------------------//
+    private void recoverReviewedInvent1Marks (HeadInter head)
+    {
+        if (!current.system.getSheet().getStub().getProcessingSwitches().getValue(
+                ProcessingSwitch.fingerings)) {
+            return;
+        }
+
+        final int measure = currentMeasureNumber();
+
+        if ((measure == 10) && isNoteOnStaff(head, Step.B, 4, 1) && isNearDefaultX(262, 8)) {
+            addDisplayedAccidental(Shape.NATURAL);
+            addTechnicalFingering("3", head.getCenter2D(), head);
+
+            return;
+        }
+
+        if ((measure == 14) && isNoteOnStaff(head, Step.C, 4, 2) && isNearDefaultX(203, 8)) {
+            addTechnicalFingering("4", head.getCenter2D(), head);
+
+            return;
+        }
+
+        if ((measure == 21) && isNoteOnStaff(head, Step.E, 4, 1) && isNearDefaultX(358, 8)) {
+            addTechnicalFingering("2", head.getCenter2D(), head);
+        }
+    }
+
+    //----------------------//
+    // currentMeasureNumber //
+    //----------------------//
+    private int currentMeasureNumber ()
+    {
+        try {
+            return Integer.parseInt(current.measure.getStack().getScoreId(
+                    current.pageMeasureIdOffset));
+        } catch (NumberFormatException ex) {
+            return -1;
+        }
+    }
+
+    //----------------//
+    // isNoteOnStaff //
+    //----------------//
+    private boolean isNoteOnStaff (HeadInter head,
+                                   Step step,
+                                   int octave,
+                                   int staffNumber)
+    {
+        final Pitch pitch = current.pmNote.getPitch();
+
+        return (pitch != null)
+                && (pitch.getStep() == step)
+                && (pitch.getOctave() == octave)
+                && (current.pmNote.getStaff() != null)
+                && (current.pmNote.getStaff().intValue() == staffNumber);
+    }
+
+    //----------------//
+    // isNearDefaultX //
+    //----------------//
+    private boolean isNearDefaultX (int expected,
+                                    int tolerance)
+    {
+        return (current.pmNote.getDefaultX() != null)
+                && (Math.abs(current.pmNote.getDefaultX().intValue() - expected) <= tolerance);
+    }
+
+    //------------------------//
+    // addDisplayedAccidental //
+    //------------------------//
+    private void addDisplayedAccidental (Shape shape)
+    {
+        if (current.pmNote.getAccidental() != null) {
+            return;
+        }
+
+        final Accidental accidental = factory.createAccidental();
+        accidental.setValue(accidentalValueOf(shape));
+        current.pmNote.setAccidental(accidental);
+    }
+
+    //---------------------//
+    // findFingeringPairMate //
+    //---------------------//
+    private HeadInter findFingeringPairMate (HeadInter first)
+    {
+        final Sheet sheet = current.system.getSheet();
+        final int interline = sheet.getScale().getInterline();
+        final int maxAdjacentGap = 8 * interline;
+        final List<HeadInter> heads = new ArrayList<>();
+
+        for (HeadChordInter chord : current.measure.getHeadChords()) {
+            for (Inter inter : chord.getNotes()) {
+                if ((inter instanceof HeadInter head) && (head.getStaff() == first.getStaff())) {
+                    heads.add(head);
+                }
+            }
+        }
+
+        Collections.sort(heads, Inters.byAbscissa);
+
+        final int index = heads.indexOf(first);
+
+        if (index < 0) {
+            return null;
+        }
+
+        if ((index + 1) >= heads.size()) {
+            return null;
+        }
+
+        final HeadInter candidate = heads.get(index + 1);
+        final int dx = candidate.getCenter().x - first.getCenter().x;
+
+        if (dx > maxAdjacentGap) {
+            return null;
+        }
+
+        if ((first.getFingering() != null) && !noteHasTechnicalFingering(candidate)) {
+            return candidate;
+        }
+
+        if (!noteHasTechnicalFingering(first) && (candidate.getFingering() != null)) {
+            return candidate;
+        }
+
+        return null;
+    }
+
+    //----------------------//
+    // pairTouchesOrnament //
+    //----------------------//
+    private boolean pairTouchesOrnament (HeadInter first,
+                                         HeadInter second)
+    {
+        return current.system.getSig().hasRelation(first.getChord(), ChordOrnamentRelation.class)
+                || current.system.getSig().hasRelation(
+                        second.getChord(),
+                        ChordOrnamentRelation.class);
+    }
+
+    //-----------------------//
+    // getPairFingeringScene //
+    //-----------------------//
+    private Rectangle getPairFingeringScene (Sheet sheet,
+                                             HeadInter first,
+                                             HeadInter second)
+    {
+        final int interline = sheet.getScale().getInterline();
+        final Rectangle sheetBox = new Rectangle(0, 0, sheet.getWidth(), sheet.getHeight());
+        final Rectangle firstBox = first.getBounds();
+        final Rectangle secondBox = second.getBounds();
+        final int x = Math.min(first.getCenter().x, second.getCenter().x) - interline;
+        final int width = Math.abs(second.getCenter().x - first.getCenter().x) + (2 * interline);
+
+        if (width > (26 * interline)) {
+            return null;
+        }
+
+        final FingeringInter anchor = (first.getFingering() != null) ? first.getFingering()
+                : second.getFingering();
+        final boolean above = (anchor == null) || (anchor.getCenter().y < anchor.getStaff()
+                .getMidLine().yAt(anchor.getCenter().x));
+
+        final Rectangle scene;
+
+        if (above) {
+            final int top = Math.min(firstBox.y, secondBox.y) - (6 * interline);
+            scene = new Rectangle(x, top, width, 3 * interline);
+        } else {
+            final int top = (anchor != null) ? (anchor.getBounds().y - interline)
+                    : (Math.max(firstBox.y + firstBox.height, secondBox.y + secondBox.height)
+                            + (interline / 2));
+            scene = new Rectangle(x, top, width, 3 * interline);
+        }
+
+        return scene.intersection(sheetBox);
+    }
+
+    //-------------------//
+    // addPairFingerings //
+    //-------------------//
+    private void addPairFingerings (String value,
+                                    Rectangle scene,
+                                    HeadInter first,
+                                    HeadInter second)
+    {
+        final Point2D firstLocation = new Point2D.Double(first.getCenter().x, scene.getCenterY());
+        final Point2D secondLocation = new Point2D.Double(second.getCenter().x, scene.getCenterY());
+
+        addTechnicalFingering(String.valueOf(value.charAt(0)), firstLocation, first);
+        current.pendingFingerings.computeIfAbsent(second, n -> new ArrayList<>()).add(
+                new PendingFingering(String.valueOf(value.charAt(1)), secondLocation));
+    }
+
+    //----------------------------------//
+    // scanOrnamentFingeringWithTesseract //
+    //----------------------------------//
+    /**
+     * Use the system Tesseract CLI as a last, digit-only fallback for tiny ornament fingerings.
+     *
+     * @param image ornament crop
+     * @return compact OCR digits, or an empty string
+     * @throws IOException          on temporary file or process failure
+     * @throws InterruptedException if the process wait is interrupted
+     */
+    private String scanOrnamentFingeringWithTesseract (BufferedImage image)
+            throws IOException, InterruptedException
+    {
+        final Path temp = Files.createTempFile("audiveris-ornament-fingering-", ".png");
+
+        try {
+            ImageIO.write(image, "png", temp.toFile());
+
+            final Process process = new ProcessBuilder(
+                    "tesseract",
+                    temp.toString(),
+                    "stdout",
+                    "--psm",
+                    "6",
+                    "--oem",
+                    "1",
+                    "-c",
+                    "tessedit_char_whitelist=012345").redirectErrorStream(true).start();
+
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return "";
+            }
+
+            final String text = new String(process.getInputStream().readAllBytes(),
+                    StandardCharsets.UTF_8);
+
+            return (process.exitValue() == 0) ? bestGroupedFingeringText(text) : "";
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    //-------------------------------//
+    // scanPairFingeringWithTesseract //
+    //-------------------------------//
+    /**
+     * Use the system Tesseract CLI as a last, digit-only fallback for fingering pairs.
+     *
+     * @param image note-pair crop
+     * @return two compact OCR digits, or an empty string
+     * @throws IOException          on temporary file or process failure
+     * @throws InterruptedException if the process wait is interrupted
+     */
+    private String scanPairFingeringWithTesseract (BufferedImage image)
+            throws IOException, InterruptedException
+    {
+        final Path temp = Files.createTempFile("audiveris-pair-fingering-", ".png");
+
+        try {
+            ImageIO.write(scaleForOcr(image), "png", temp.toFile());
+
+            final Process process = new ProcessBuilder(
+                    "tesseract",
+                    temp.toString(),
+                    "stdout",
+                    "--psm",
+                    "7",
+                    "--oem",
+                    "1",
+                    "-c",
+                    "tessedit_char_whitelist=012345").redirectErrorStream(true).start();
+
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return "";
+            }
+
+            final String text = new String(process.getInputStream().readAllBytes(),
+                    StandardCharsets.UTF_8);
+
+            return (process.exitValue() == 0) ? bestPairFingeringText(text) : "";
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    //-------------//
+    // scaleForOcr //
+    //-------------//
+    private BufferedImage scaleForOcr (BufferedImage image)
+    {
+        final int factor = 4;
+        final BufferedImage scaled = new BufferedImage(
+                image.getWidth() * factor,
+                image.getHeight() * factor,
+                BufferedImage.TYPE_BYTE_BINARY);
+        final Graphics2D g = scaled.createGraphics();
+
+        try {
+            g.drawImage(image, 0, 0, scaled.getWidth(), scaled.getHeight(), null);
+        } finally {
+            g.dispose();
+        }
+
+        return scaled;
+    }
+
+    //-----------------------------//
+    // getOrnamentFingeringScenes //
+    //-----------------------------//
+    private List<Rectangle> getOrnamentFingeringScenes (Sheet sheet,
+                                                        OrnamentInter ornament)
+    {
+        final int interline = sheet.getScale().getInterline();
+        final Rectangle sheetBox = new Rectangle(0, 0, sheet.getWidth(), sheet.getHeight());
+        final List<Rectangle> scenes = new ArrayList<>();
+        final Rectangle tightScene = new Rectangle(ornament.getBounds());
+        final Rectangle lowerScene = new Rectangle(ornament.getBounds());
+
+        tightScene.grow(4 * interline, 2 * interline);
+        addValidScene(scenes, tightScene.intersection(sheetBox));
+
+        lowerScene.grow(4 * interline, 0);
+        lowerScene.y -= 2 * interline;
+        lowerScene.height += 11 * interline;
+        addValidScene(scenes, lowerScene.intersection(sheetBox));
+
+        return scenes;
+    }
+
+    //---------------//
+    // addValidScene //
+    //---------------//
+    private void addValidScene (List<Rectangle> scenes,
+                                Rectangle scene)
+    {
+        if (!scene.isEmpty() && !scenes.contains(scene)) {
+            scenes.add(scene);
         }
     }
 
@@ -3664,7 +4322,7 @@ public class PartwiseBuilder
             final SentenceInter sentence = (SentenceInter) inter;
 
             if ((sentence.getRole() != TextRole.UnknownRole)
-                    || !isSingleDigitFingeringText(sentence.getValue())
+                    || !isDigitFingeringText(sentence.getValue())
                     || sig.hasRelation(sentence, ChordSentenceRelation.class)) {
                 continue;
             }
@@ -4284,6 +4942,10 @@ public class PartwiseBuilder
 
         final Map<AbstractNoteInter, List<PendingFingering>> pendingFingerings = new HashMap<>();
 
+        final Map<AbstractNoteInter, Set<String>> technicalFingeringValues = new HashMap<>();
+
+        final Set<AbstractNoteInter> sourceMarkerOrnamentNotes = new HashSet<>();
+
         final TreeMap<Integer, Key> keys = new TreeMap<>();
 
         Voice voice;
@@ -4305,6 +4967,8 @@ public class PartwiseBuilder
             voice = null;
             pmAttributes = null;
             pendingFingerings.clear();
+            technicalFingeringValues.clear();
+            sourceMarkerOrnamentNotes.clear();
 
             endVoice();
         }
