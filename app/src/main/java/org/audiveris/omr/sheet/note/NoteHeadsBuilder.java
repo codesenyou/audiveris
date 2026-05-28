@@ -1262,7 +1262,7 @@ public class NoteHeadsBuilder
                 "Vertical margin for intercepting stem seed around a target pitch");
 
         private final Constant.Ratio stemLessBoost = new Constant.Ratio(
-                0, // Was 0.38,
+                0.38,
                 "How much do we boost stem-less heads (always isolated)");
 
         private final Constant.Ratio crossBoost = new Constant.Ratio(
