@@ -69,6 +69,7 @@ import org.audiveris.omr.sig.inter.FingeringInter;
 import org.audiveris.omr.sig.inter.HeadChordInter;
 import org.audiveris.omr.sig.inter.HeadInter;
 import org.audiveris.omr.sig.inter.Inter;
+import org.audiveris.omr.sig.inter.Inters;
 import org.audiveris.omr.sig.inter.KeyInter;
 import org.audiveris.omr.sig.inter.LyricItemInter;
 import org.audiveris.omr.sig.inter.MarkerInter;
@@ -89,6 +90,7 @@ import org.audiveris.omr.sig.inter.StaffBarlineInter;
 import org.audiveris.omr.sig.inter.TremoloInter;
 import org.audiveris.omr.sig.inter.TupletInter;
 import org.audiveris.omr.sig.inter.WedgeInter;
+import org.audiveris.omr.sig.inter.WordInter;
 import org.audiveris.omr.sig.relation.ChordArpeggiatoRelation;
 import org.audiveris.omr.sig.relation.ChordArticulationRelation;
 import org.audiveris.omr.sig.relation.ChordBowRelation;
@@ -1531,6 +1533,18 @@ public class PartwiseBuilder
             logger.debug("Visiting {}", sentence);
 
             final String content = sentence.getValue();
+            if (isFingeringDirection(content)) {
+                processFingeringDirection(sentence);
+
+                return;
+            }
+
+            if (hasOrnamentFingeringWords(sentence)) {
+                processOrnamentFingeringWords(sentence);
+
+                return;
+            }
+
             final Direction direction = factory.createDirection();
             final Point2D location = sentence.getLocation();
 
@@ -1614,6 +1628,246 @@ public class PartwiseBuilder
         } catch (Exception ex) {
             logger.warn("Error visiting {} in {}", sentence, current.page, ex);
         }
+    }
+
+    //---------------------------//
+    // processFingeringDirection //
+    //---------------------------//
+    // For OCR text such as "534" linked as a direction above a chord.
+    private void processFingeringDirection (SentenceInter sentence)
+    {
+        final Point2D location = sentence.getLocation();
+        addTechnicalFingering(sentence.getValue().trim(), location, current.note);
+    }
+
+    //-------------------------------//
+    // processOrnamentFingeringWords //
+    //-------------------------------//
+    private void processOrnamentFingeringWords (SentenceInter sentence)
+    {
+        for (Inter inter : sentence.getMembers()) {
+            final WordInter word = (WordInter) inter;
+
+            if (isSingleDigitFingeringText(word.getValue())) {
+                processOrnamentFingeringWord(word);
+            }
+        }
+    }
+
+    //--------------------------------//
+    // processOrnamentFingeringWord //
+    //--------------------------------//
+    private void processOrnamentFingeringWord (WordInter word)
+    {
+        final AbstractNoteInter target = findOrnamentFingeringTarget(word);
+        final PendingFingering pending = new PendingFingering(word.getValue().trim(),
+                word.getLocation());
+
+        if ((target == null) || (target == current.note)) {
+            addTechnicalFingering(pending, current.note);
+        } else {
+            current.pendingFingerings.computeIfAbsent(target, n -> new ArrayList<>()).add(pending);
+        }
+    }
+
+    //----------------------------//
+    // hasOrnamentFingeringWords //
+    //----------------------------//
+    private boolean hasOrnamentFingeringWords (SentenceInter sentence)
+    {
+        if (!current.system.getSheet().getStub().getProcessingSwitches().getValue(
+                ProcessingSwitch.fingerings)) {
+            return false;
+        }
+
+        int digitCount = 0;
+        boolean hasOrnamentMarker = false;
+
+        for (Inter inter : sentence.getMembers()) {
+            if (!(inter instanceof WordInter word)) {
+                return false;
+            }
+
+            final String value = word.getValue().trim();
+
+            if (isSingleDigitFingeringText(value)) {
+                digitCount++;
+            } else if (isOrnamentSourceMarker(value)) {
+                hasOrnamentMarker = true;
+            } else {
+                return false;
+            }
+        }
+
+        return hasOrnamentMarker && (digitCount >= 1);
+    }
+
+    //------------------------//
+    // isOrnamentSourceMarker //
+    //------------------------//
+    private boolean isOrnamentSourceMarker (String value)
+    {
+        return value.contains("*") || value.contains("[") || value.contains("]");
+    }
+
+    //--------------------------------//
+    // findOrnamentFingeringTarget //
+    //--------------------------------//
+    /**
+     * Find the note intended by one digit inside an OCR marker sentence such as "[M]*) 3 2".
+     * <p>
+     * The sentence relation points to the source ornament chord, but the digit word boxes are
+     * positioned over later notes. Use each word's own geometry to attach the fingering to that
+     * later note.
+     *
+     * @param word the OCR digit word
+     * @return the note to receive the fingering, or null if none is clear
+     */
+    private AbstractNoteInter findOrnamentFingeringTarget (WordInter word)
+    {
+        final Rectangle box = new Rectangle(word.getBounds());
+        AbstractChordInter chord = current.measure.getStack().getEventChord(word.getLocation(),
+                box, true);
+
+        if (isUsableOrnamentFingeringChord(chord)) {
+            return firstNoteInChord(chord, current.note.getStaff());
+        }
+
+        chord = findClosestFollowingChord(word);
+
+        if (chord != null) {
+            return firstNoteInChord(chord, current.note.getStaff());
+        }
+
+        return null;
+    }
+
+    //--------------------------//
+    // findClosestFollowingChord //
+    //--------------------------//
+    private AbstractChordInter findClosestFollowingChord (WordInter word)
+    {
+        final Staff staff = current.note.getStaff();
+        final int sourceX = current.note.getChord().getCenter().x;
+        final double wordX = word.getLocation().getX();
+        AbstractChordInter bestChord = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (HeadChordInter chord : current.measure.getHeadChords()) {
+            if ((chord.getTopStaff() != staff) || (chord == current.note.getChord())
+                    || (chord.getCenter().x <= sourceX)) {
+                continue;
+            }
+
+            final double distance = Math.abs(chord.getCenter().x - wordX);
+
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestChord = chord;
+            }
+        }
+
+        return bestChord;
+    }
+
+    //--------------------------------//
+    // isUsableOrnamentFingeringChord //
+    //--------------------------------//
+    private boolean isUsableOrnamentFingeringChord (AbstractChordInter chord)
+    {
+        return (chord != null) && (chord.getTopStaff() == current.note.getStaff());
+    }
+
+    //-----------------//
+    // firstNoteInChord //
+    //-----------------//
+    private AbstractNoteInter firstNoteInChord (AbstractChordInter chord,
+                                                Staff staff)
+    {
+        for (Inter inter : chord.getNotes()) {
+            if ((inter instanceof AbstractNoteInter note) && (note.getStaff() == staff)) {
+                return note;
+            }
+        }
+
+        return null;
+    }
+
+    //----------------------//
+    // isFingeringDirection //
+    //----------------------//
+    private boolean isFingeringDirection (String content)
+    {
+        if (!current.system.getSheet().getStub().getProcessingSwitches().getValue(
+                ProcessingSwitch.fingerings)) {
+            return false;
+        }
+
+        final String value = content.trim();
+
+        if (value.isEmpty()) {
+            return false;
+        }
+
+        int digitCount = 0;
+        boolean previousWasSeparator = false;
+
+        for (int i = 0; i < value.length(); i++) {
+            final char ch = value.charAt(i);
+
+            if ((ch >= '0') && (ch <= '5')) {
+                digitCount++;
+                previousWasSeparator = false;
+            } else if ((ch == '-') || Character.isWhitespace(ch)) {
+                if ((i == 0) || previousWasSeparator) {
+                    return false;
+                }
+
+                previousWasSeparator = true;
+            } else {
+                return false;
+            }
+        }
+
+        return (digitCount >= 1) && !previousWasSeparator;
+    }
+
+    //------------------------------//
+    // isSingleDigitFingeringText //
+    //------------------------------//
+    private boolean isSingleDigitFingeringText (String content)
+    {
+        final String value = content.trim();
+
+        return (value.length() == 1) && (value.charAt(0) >= '0') && (value.charAt(0) <= '5');
+    }
+
+    //----------------------//
+    // addTechnicalFingering //
+    //----------------------//
+    private void addTechnicalFingering (PendingFingering fingering,
+                                        AbstractNoteInter note)
+    {
+        addTechnicalFingering(fingering.value, fingering.location, note);
+    }
+
+    //----------------------//
+    // addTechnicalFingering //
+    //----------------------//
+    private void addTechnicalFingering (String value,
+                                        Point2D location,
+                                        AbstractNoteInter note)
+    {
+        final Staff staff = note.getStaff();
+        final Fingering pmFingering = factory.createFingering();
+
+        pmFingering.setValue(value);
+        pmFingering.setPlacement(
+                location.getY() < note.getCenter().y ? AboveBelow.ABOVE : AboveBelow.BELOW);
+        pmFingering.setDefaultY(yOf(location, staff));
+
+        getTechnical().getUpBowOrDownBowOrHarmonic().add(
+                factory.createTechnicalFingering(pmFingering));
     }
 
     //-----------------//
@@ -2050,6 +2304,8 @@ public class PartwiseBuilder
                 }
             }
 
+            inferMissingInlineClefs(measure);
+
             // Clefs may be inserted further down the measure
             final ClefIterators clefIters = new ClefIterators(measure);
 
@@ -2236,6 +2492,138 @@ public class PartwiseBuilder
         current.endMeasure();
         tupletNumbers.clear();
         isFirst.measure = false;
+    }
+
+    //--------------------------//
+    // inferMissingInlineClefs //
+    //--------------------------//
+    /**
+     * Recover an inline bass clef that was missed by symbol recognition.
+     * <p>
+     * The visible symptom is a lower staff under treble clef whose note-head pitch positions
+     * suddenly jump far above the staff, followed by a later system that confirms the staff has
+     * switched back to bass clef. Inserting the clef before note export lets the ordinary clef
+     * iterator and pitch calculation handle the MusicXML consistently.
+     *
+     * @param measure the measure to inspect
+     */
+    private void inferMissingInlineClefs (Measure measure)
+    {
+        if (measure.isDummy()) {
+            return;
+        }
+
+        for (Staff staff : measure.getPart().getStaves()) {
+            if (staff.getIndexInPart() == 0) {
+                continue;
+            }
+
+            inferMissingInlineBassClef(measure, staff);
+        }
+    }
+
+    //-----------------------------//
+    // inferMissingInlineBassClef //
+    //-----------------------------//
+    private void inferMissingInlineBassClef (Measure measure,
+                                             Staff staff)
+    {
+        final ClefInter firstClef = measure.getFirstMeasureClef(staff.getIndexInPart());
+
+        if ((firstClef == null) || (firstClef.getKind() != ClefInter.ClefKind.TREBLE)) {
+            return;
+        }
+
+        final ClefInter prototype = findFollowingBassClef(measure, staff);
+
+        if (prototype == null) {
+            return;
+        }
+
+        final List<AbstractNoteInter> notes = new ArrayList<>();
+
+        for (HeadChordInter chord : measure.getHeadChords()) {
+            for (Inter inter : chord.getNotes()) {
+                if ((inter instanceof AbstractNoteInter note) && (note.getStaff() == staff)) {
+                    notes.add(note);
+                }
+            }
+        }
+
+        if (notes.size() < constants.inlineClefTailMinCount.getValue()) {
+            return;
+        }
+
+        Collections.sort(notes, Inters.byFullCenterAbscissa);
+
+        for (int i = 1; i < notes.size(); i++) {
+            final AbstractNoteInter previous = notes.get(i - 1);
+            final AbstractNoteInter current = notes.get(i);
+            final int pitchDrop = previous.getIntegerPitch() - current.getIntegerPitch();
+
+            if ((pitchDrop >= constants.inlineBassClefMinPitchDrop.getValue())
+                    && (current.getIntegerPitch()
+                            <= constants.inlineBassClefMaxTailPitch.getValue())
+                    && hasBassClefTail(notes, i)) {
+                final ClefInter inferred = prototype.replicate(staff);
+                final int centerX = (previous.getCenter().x + current.getCenter().x) / 2;
+                final Rectangle protoBounds = prototype.getBounds();
+                final int width = protoBounds != null ? protoBounds.width : 40;
+                final int height = protoBounds != null ? protoBounds.height : 80;
+                final int centerY = (int) Math.rint(staff.pitchToOrdinate(centerX, -2));
+
+                inferred.setBounds(new Rectangle(centerX - (width / 2), centerY - (height / 2),
+                        width, height));
+                measure.addInter(inferred);
+
+                logger.info("Inferred missing inline bass clef in {} staff#{} at x={}", measure,
+                        staff.getId(), centerX);
+
+                return;
+            }
+        }
+    }
+
+    //-----------------------//
+    // findFollowingBassClef //
+    //-----------------------//
+    private ClefInter findFollowingBassClef (Measure measure,
+                                             Staff staff)
+    {
+        final int staffIndex = staff.getIndexInPart();
+        Part part = measure.getPart().getFollowingInPage();
+
+        while (part != null) {
+            for (Measure nextMeasure : part.getMeasures()) {
+                final ClefInter clef = nextMeasure.getFirstMeasureClef(staffIndex);
+
+                if ((clef != null) && (clef.getKind() == ClefInter.ClefKind.BASS)) {
+                    return clef;
+                }
+            }
+
+            part = part.getFollowingInPage();
+        }
+
+        return null;
+    }
+
+    //----------------//
+    // hasBassClefTail //
+    //----------------//
+    private boolean hasBassClefTail (List<AbstractNoteInter> notes,
+                                     int start)
+    {
+        int tailCount = 0;
+
+        for (int i = start; i < notes.size(); i++) {
+            if (notes.get(i).getIntegerPitch()
+                    <= constants.inlineBassClefMaxTailPitch.getValue()) {
+                tailCount++;
+            }
+        }
+
+        return tailCount >= constants.inlineClefTailMinCount.getValue();
     }
 
     //-------------//
@@ -2588,6 +2976,15 @@ public class PartwiseBuilder
 
                     getTechnical().getUpBowOrDownBowOrHarmonic().add(
                             factory.createTechnicalFingering(pmFingering));
+                }
+
+                final List<PendingFingering> pendingFingerings = current.pendingFingerings.remove(
+                        note);
+
+                if (pendingFingerings != null) {
+                    for (PendingFingering pending : pendingFingerings) {
+                        addTechnicalFingering(pending, note);
+                    }
                 }
 
                 // Plucking?
@@ -3217,6 +3614,8 @@ public class PartwiseBuilder
             current.multipleRests = system.getSig().inters(MultipleRestInter.class);
             isFirst.measure = true;
 
+            linkUnknownDigitFingerings(system);
+
             final Part systemPart = system.getPartById(current.logicalPart.getId());
 
             if (systemPart != null) {
@@ -3244,6 +3643,47 @@ public class PartwiseBuilder
             }
         } catch (Exception ex) {
             logger.warn("Error visiting {} in {}", system, current.page, ex);
+        }
+    }
+
+    //------------------------------//
+    // linkUnknownDigitFingerings //
+    //------------------------------//
+    private void linkUnknownDigitFingerings (SystemInfo system)
+    {
+        if (!system.getSheet().getStub().getProcessingSwitches().getValue(
+                ProcessingSwitch.fingerings)) {
+            return;
+        }
+
+        final SIGraph sig = system.getSig();
+        final Scale scale = system.getSheet().getScale();
+        final int xGapMax = scale.toPixels(ChordSentenceRelation.getXGapMax());
+
+        for (Inter inter : sig.inters(SentenceInter.class)) {
+            final SentenceInter sentence = (SentenceInter) inter;
+
+            if ((sentence.getRole() != TextRole.UnknownRole)
+                    || !isSingleDigitFingeringText(sentence.getValue())
+                    || sig.hasRelation(sentence, ChordSentenceRelation.class)) {
+                continue;
+            }
+
+            final Point2D location = sentence.getLocation();
+            final MeasureStack stack = system.getStackAt(location);
+
+            if (stack == null) {
+                continue;
+            }
+
+            final Rectangle box = new Rectangle(sentence.getBounds());
+            box.grow(xGapMax, 0);
+
+            final AbstractChordInter chord = stack.getEventChord(location, box, true);
+
+            if (chord != null) {
+                sig.addEdge(chord, sentence, new ChordSentenceRelation());
+            }
         }
     }
 
@@ -3783,6 +4223,21 @@ public class PartwiseBuilder
                 "count",
                 1,
                 "Default value for multirest measure count");
+
+        private final Constant.Integer inlineBassClefMinPitchDrop = new Constant.Integer(
+                "pitch",
+                8,
+                "Minimum raw pitch-position drop suggesting a missed inline bass clef");
+
+        private final Constant.Integer inlineBassClefMaxTailPitch = new Constant.Integer(
+                "pitch",
+                -3,
+                "Maximum raw pitch position for notes after a missed inline bass clef");
+
+        private final Constant.Integer inlineClefTailMinCount = new Constant.Integer(
+                "count",
+                4,
+                "Minimum number of tail notes confirming a missed inline clef");
     }
 
     //---------//
@@ -3827,6 +4282,8 @@ public class PartwiseBuilder
 
         ScorePartwise.Part.Measure pmMeasure;
 
+        final Map<AbstractNoteInter, List<PendingFingering>> pendingFingerings = new HashMap<>();
+
         final TreeMap<Integer, Key> keys = new TreeMap<>();
 
         Voice voice;
@@ -3847,6 +4304,7 @@ public class PartwiseBuilder
             pmMeasure = null;
             voice = null;
             pmAttributes = null;
+            pendingFingerings.clear();
 
             endVoice();
         }
@@ -3866,6 +4324,23 @@ public class PartwiseBuilder
             pmAttributes = null;
 
             endNote();
+        }
+    }
+
+    //------------------//
+    // PendingFingering //
+    //------------------//
+    private static class PendingFingering
+    {
+        final String value;
+
+        final Point2D location;
+
+        PendingFingering (String value,
+                          Point2D location)
+        {
+            this.value = value;
+            this.location = location;
         }
     }
 
